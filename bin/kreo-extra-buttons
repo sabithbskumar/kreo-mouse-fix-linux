@@ -30,10 +30,15 @@ DEBUG = os.environ.get("KREO_DEBUG") == "1"
 CONFIG_PATH = "/etc/kreo-extra-buttons.conf"
 
 VENDOR_ID = 0x248A
-PRODUCT_ID = 0x8266
+# The mouse enumerates with a different product ID per connection: one over
+# Bluetooth, another when plugged in over USB.
+PRODUCT_IDS = {0x8266, 0x5B49}
 
-# Report ID 3 is the mouse report: [id, buttons, x_lo, x_hi, y_lo, y_hi, wheel]
-REPORT_ID = 0x03
+# The mouse report layout: [id, buttons, x_lo, x_hi, y_lo, y_hi, wheel]. Its
+# report ID varies by connection (found dynamically, see find_hidraw), since
+# wired mode shares one USB interface with other HID collections that claim
+# their own report IDs.
+MOUSE_COLLECTION_PREFIX = bytes([0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85])
 REPORT_LEN = 7
 
 # bit mask -> (config key, default evdev code name)
@@ -75,27 +80,49 @@ BUTTON_MAP = load_button_map()  # mask -> (code, name)
 
 
 def find_hidraw():
-    """Returns the /dev/hidraw path for VENDOR_ID:PRODUCT_ID, or None."""
-    target = f"{VENDOR_ID:08X}:{PRODUCT_ID:08X}"
+    """Finds the mouse's hidraw device and its report ID.
+
+    Returns (path, report_id), or (None, None) if not found. Matches on
+    VENDOR_ID/PRODUCT_IDS first, then, since a matching device may expose
+    several HID interfaces (as it does over USB), picks the one whose report
+    descriptor actually declares a Generic Desktop > Mouse collection, and
+    reads that collection's report ID straight out of the descriptor rather
+    than assuming a fixed value.
+    """
+    targets = {f"{VENDOR_ID:08X}:{pid:08X}" for pid in PRODUCT_IDS}
     for uevent_path in glob.glob("/sys/class/hidraw/hidraw*/device/uevent"):
         try:
             with open(uevent_path) as f:
                 content = f.read()
         except OSError:
             continue
-        if target in content:
-            return "/dev/" + uevent_path.split("/")[4]
-    return None
+        if not any(target in content for target in targets):
+            continue
+
+        hidraw_name = uevent_path.split("/")[4]
+        descriptor_path = f"/sys/class/hidraw/{hidraw_name}/device/report_descriptor"
+        try:
+            with open(descriptor_path, "rb") as f:
+                descriptor = f.read()
+        except OSError:
+            continue
+
+        offset = descriptor.find(MOUSE_COLLECTION_PREFIX)
+        if offset == -1:
+            continue
+        report_id = descriptor[offset + len(MOUSE_COLLECTION_PREFIX)]
+        return f"/dev/{hidraw_name}", report_id
+    return None, None
 
 
 def wait_for_device(poll_interval=2):
     """Blocks until the mouse is found, polling every poll_interval seconds."""
-    path = find_hidraw()
+    path, report_id = find_hidraw()
     while not path:
         print("Kreo Chimera mouse not found, waiting...", flush=True)
         time.sleep(poll_interval)
-        path = find_hidraw()
-    return path
+        path, report_id = find_hidraw()
+    return path, report_id
 
 
 def main():
@@ -107,15 +134,15 @@ def main():
 
     try:
         while True:
-            path = wait_for_device()
-            print(f"Listening on {path}", flush=True)
+            path, report_id = wait_for_device()
+            print(f"Listening on {path} (report ID {report_id})", flush=True)
             try:
                 with open(path, "rb") as f:
                     while True:
                         data = f.read(REPORT_LEN)
                         if not data:
                             break  # device disconnected
-                        if len(data) < 2 or data[0] != REPORT_ID:
+                        if len(data) < 2 or data[0] != report_id:
                             continue
                         button_byte = data[1]
                         for mask, (code, name) in BUTTON_MAP.items():

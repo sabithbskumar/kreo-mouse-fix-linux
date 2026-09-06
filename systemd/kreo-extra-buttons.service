@@ -1,0 +1,12 @@
+[Unit]
+Description=Kreo Chimera mouse extra button bridge
+After=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/kreo-extra-buttons
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

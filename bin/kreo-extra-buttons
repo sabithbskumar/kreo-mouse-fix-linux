@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Bridges the 2 custom Kreo Chimera mouse buttons to real input events.
+
+The mouse's HID report descriptor declares its button field as 5 bits
+wide but only assigns usages to buttons 1-3 (Left/Right/Middle). Bits 3
+and 4 (values 0x08 and 0x10 in the button byte) ARE sent by the mouse
+for its 2 custom buttons, but since the descriptor never assigns them a
+usage, they're undefined per spec.
+
+Windows' inbox HID mouse driver natively understands 5 buttons (left,
+right, middle, plus button 4 and 5 as back/forward), no vendor driver
+involved, which is why this works on Windows before installing
+anything from Kreo. Linux's hid-generic driver is stricter and only
+maps usages actually declared in range, so it drops bits 3 and 4.
+Kreo's "Chimera" app isn't what makes the buttons work on Windows; it's
+only needed to reassign them to something else.
+
+This reads the raw hidraw reports directly (bypassing HID-input) and
+synthesizes the missing button events via a virtual uinput device.
+
+Requires root (for /dev/hidraw* and /dev/uinput access).
+"""
+import glob
+import os
+import time
+
+from evdev import UInput, ecodes as e
+
+DEBUG = os.environ.get("KREO_DEBUG") == "1"
+CONFIG_PATH = "/etc/kreo-extra-buttons.conf"
+
+VENDOR_ID = 0x248A
+PRODUCT_ID = 0x8266
+
+# Report ID 3 is the mouse report: [id, buttons, x_lo, x_hi, y_lo, y_hi, wheel]
+REPORT_ID = 0x03
+REPORT_LEN = 7
+
+# bit mask -> (config key, default evdev code name)
+BUTTON_SLOTS = {
+    0x08: ("button1", "BTN_SIDE"),
+    0x10: ("button2", "BTN_EXTRA"),
+}
+
+
+def load_button_map():
+    """Reads CONFIG_PATH and resolves each button slot to an evdev code."""
+    settings = {key: default for key, default in BUTTON_SLOTS.values()}
+    try:
+        with open(CONFIG_PATH) as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if not line or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip()
+                if key in settings:
+                    settings[key] = value
+    except FileNotFoundError:
+        pass
+
+    button_map = {}
+    for mask, (key, default) in BUTTON_SLOTS.items():
+        name = settings[key]
+        code = e.ecodes.get(name)
+        if code is None:
+            print(f"Unknown evdev code {name!r} for {key} in {CONFIG_PATH}, "
+                  f"falling back to {default}", flush=True)
+            name, code = default, e.ecodes[default]
+        button_map[mask] = (code, name)
+    return button_map
+
+
+BUTTON_MAP = load_button_map()  # mask -> (code, name)
+
+
+def find_hidraw():
+    """Returns the /dev/hidraw path for VENDOR_ID:PRODUCT_ID, or None."""
+    target = f"{VENDOR_ID:08X}:{PRODUCT_ID:08X}"
+    for uevent_path in glob.glob("/sys/class/hidraw/hidraw*/device/uevent"):
+        try:
+            with open(uevent_path) as f:
+                content = f.read()
+        except OSError:
+            continue
+        if target in content:
+            return "/dev/" + uevent_path.split("/")[4]
+    return None
+
+
+def wait_for_device(poll_interval=2):
+    """Blocks until the mouse is found, polling every poll_interval seconds."""
+    path = find_hidraw()
+    while not path:
+        print("Kreo Chimera mouse not found, waiting...", flush=True)
+        time.sleep(poll_interval)
+        path = find_hidraw()
+    return path
+
+
+def main():
+    """Creates the uinput device and bridges button presses until killed."""
+    codes = [code for code, _ in BUTTON_MAP.values()]
+    capabilities = {e.EV_KEY: codes}
+    ui = UInput(capabilities, name="kreo-chimera-extra-buttons")
+    prev_state = {mask: False for mask in BUTTON_MAP}
+
+    try:
+        while True:
+            path = wait_for_device()
+            print(f"Listening on {path}", flush=True)
+            try:
+                with open(path, "rb") as f:
+                    while True:
+                        data = f.read(REPORT_LEN)
+                        if not data:
+                            break  # device disconnected
+                        if len(data) < 2 or data[0] != REPORT_ID:
+                            continue
+                        button_byte = data[1]
+                        for mask, (code, name) in BUTTON_MAP.items():
+                            pressed = bool(button_byte & mask)
+                            if pressed != prev_state[mask]:
+                                ui.write(e.EV_KEY, code, 1 if pressed else 0)
+                                ui.syn()
+                                prev_state[mask] = pressed
+                                if DEBUG:
+                                    state = "DOWN" if pressed else "UP"
+                                    print(f"{name} {state}", flush=True)
+            except OSError:
+                pass
+            print("Device disconnected, will retry", flush=True)
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        ui.close()
+
+
+if __name__ == "__main__":
+    main()

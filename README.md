@@ -94,7 +94,7 @@ itself. The `.conf` file above is the Linux-side equivalent.
 
 ## Adapting for other Kreo mice
 
-If your mouse has a different vendor/product ID, or a different bit
+If your mouse has a different vendor ID or name, or a different bit
 layout for its extra buttons, find it with:
 
 ```sh
@@ -102,7 +102,7 @@ cat /sys/class/hidraw/hidraw*/device/uevent   # find HID_ID and HID_NAME
 sudo xxd /dev/hidrawN                         # press buttons, watch which byte/bit changes
 ```
 
-Update `VENDOR_ID` and `PRODUCT_ID` at the top of
+Update `VENDOR_ID` and `NAME_SUBSTRING` at the top of
 `/usr/bin/kreo-extra-buttons` to match, and `BUTTON_SLOTS` if the extra
 buttons use different bits than `0x08`/`0x10`. What each button does is
 still set through `/etc/kreo-extra-buttons.conf`, as above.

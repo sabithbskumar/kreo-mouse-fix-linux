@@ -30,9 +30,10 @@ DEBUG = os.environ.get("KREO_DEBUG") == "1"
 CONFIG_PATH = "/etc/kreo-extra-buttons.conf"
 
 VENDOR_ID = 0x248A
-# The mouse enumerates with a different product ID per connection: one over
-# Bluetooth, another when plugged in over USB.
-PRODUCT_IDS = {0x8266, 0x5B49}
+# The mouse enumerates with a different product ID for every connection mode
+# (Bluetooth, wired, 2.4GHz dongle), and 0x248A is a chip vendor ID (Telink)
+# shared by many unrelated peripherals, so match on the device name instead.
+NAME_SUBSTRING = "chimera"
 
 # The mouse report layout: [id, buttons, x_lo, x_hi, y_lo, y_hi, wheel]. Its
 # report ID varies by connection (found dynamically, see find_hidraw), since
@@ -83,20 +84,26 @@ def find_hidraw():
     """Finds the mouse's hidraw device and its report ID.
 
     Returns (path, report_id), or (None, None) if not found. Matches on
-    VENDOR_ID/PRODUCT_IDS first, then, since a matching device may expose
-    several HID interfaces (as it does over USB), picks the one whose report
-    descriptor actually declares a Generic Desktop > Mouse collection, and
-    reads that collection's report ID straight out of the descriptor rather
-    than assuming a fixed value.
+    VENDOR_ID and NAME_SUBSTRING first, then, since a matching device may
+    expose several HID interfaces (as it does over USB), picks the one whose
+    report descriptor actually declares a Generic Desktop > Mouse collection,
+    and reads that collection's report ID straight out of the descriptor
+    rather than assuming a fixed value.
     """
-    targets = {f"{VENDOR_ID:08X}:{pid:08X}" for pid in PRODUCT_IDS}
     for uevent_path in glob.glob("/sys/class/hidraw/hidraw*/device/uevent"):
         try:
             with open(uevent_path) as f:
-                content = f.read()
+                fields = dict(
+                    line.split("=", 1) for line in f.read().splitlines() if "=" in line
+                )
         except OSError:
             continue
-        if not any(target in content for target in targets):
+
+        hid_id_parts = fields.get("HID_ID", "").split(":")
+        hid_name = fields.get("HID_NAME", "")
+        if len(hid_id_parts) != 3 or int(hid_id_parts[1], 16) != VENDOR_ID:
+            continue
+        if NAME_SUBSTRING not in hid_name.lower():
             continue
 
         hidraw_name = uevent_path.split("/")[4]

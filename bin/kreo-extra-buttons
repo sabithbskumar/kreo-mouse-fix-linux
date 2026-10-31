@@ -22,6 +22,7 @@ Requires root (for /dev/hidraw* and /dev/uinput access).
 """
 import glob
 import os
+import struct
 import time
 
 from evdev import UInput, ecodes as e
@@ -132,6 +133,53 @@ def wait_for_device(poll_interval=2):
     return path, report_id
 
 
+def native_key_codes(path):
+    """Returns the key codes the kernel's own input device reports for path."""
+    long_bits = struct.calcsize("l") * 8
+    hidraw_name = os.path.basename(path)
+    codes = set()
+    for caps_path in glob.glob(
+        f"/sys/class/hidraw/{hidraw_name}/device/input/input*/capabilities/key"
+    ):
+        try:
+            with open(caps_path) as f:
+                words = f.read().split()
+        except OSError:
+            continue
+        for index, word in enumerate(reversed(words)):
+            value = int(word, 16)
+            codes.update(
+                index * long_bits + bit
+                for bit in range(long_bits)
+                if value >> bit & 1
+            )
+    return codes
+
+
+def buttons_to_bridge(path):
+    """Returns the subset of BUTTON_MAP the kernel doesn't already handle.
+
+    Newer kernels' hid-rakk driver fixes this mouse's descriptor, so the
+    extra buttons arrive natively as BTN_SIDE/BTN_EXTRA. Bridging those too
+    would send every press twice, from two devices, which can wedge input
+    to the focused window.
+    """
+    native = native_key_codes(path)
+    bridged = {}
+    for mask, (code, name) in BUTTON_MAP.items():
+        key, default = BUTTON_SLOTS[mask]
+        if e.ecodes[default] not in native:
+            bridged[mask] = (code, name)
+        elif code == e.ecodes[default]:
+            print(f"Kernel already provides {name} for {key}, not bridging",
+                  flush=True)
+        else:
+            bridged[mask] = (code, name)
+            print(f"Kernel already provides {default} for {key}, so it will "
+                  f"fire alongside the remapped {name}", flush=True)
+    return bridged
+
+
 def main():
     """Creates the uinput device and bridges button presses until killed."""
     codes = [code for code, _ in BUTTON_MAP.values()]
@@ -143,6 +191,7 @@ def main():
         while True:
             path, report_id = wait_for_device()
             print(f"Listening on {path} (report ID {report_id})", flush=True)
+            bridged = buttons_to_bridge(path)
             try:
                 with open(path, "rb") as f:
                     while True:
@@ -152,7 +201,7 @@ def main():
                         if len(data) < 2 or data[0] != report_id:
                             continue
                         button_byte = data[1]
-                        for mask, (code, name) in BUTTON_MAP.items():
+                        for mask, (code, name) in bridged.items():
                             pressed = bool(button_byte & mask)
                             if pressed != prev_state[mask]:
                                 ui.write(e.EV_KEY, code, 1 if pressed else 0)

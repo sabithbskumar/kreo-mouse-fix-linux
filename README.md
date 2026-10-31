@@ -28,6 +28,15 @@ By default the 2 buttons are mapped to `BTN_SIDE`/`BTN_EXTRA` (mouse
 back/forward), which browsers and file managers already understand out
 of the box.
 
+Newer kernels ship a `hid-rakk` driver that fixes this same descriptor
+and can bind to the mouse, since it shares a vendor and product ID with
+the Rakk Dasig X. The buttons then work with no help. The daemon checks
+for this on every connection and stops bridging any button the kernel
+already provides, so a press isn't sent twice. On those kernels you only
+need this tool to remap the buttons, and a remapped button fires its
+native `BTN_SIDE`/`BTN_EXTRA` event as well, because the daemon can't
+suppress it.
+
 ## Requirements
 
 - Linux with `/dev/uinput` available (standard on any modern kernel)
